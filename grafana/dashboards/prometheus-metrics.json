@@ -1,0 +1,202 @@
+{
+    "title": "System Metrics - Prometheus",
+    "tags": [
+        "prometheus",
+        "metrics",
+        "system"
+    ],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 0,
+    "refresh": "10s",
+    "panels": [
+        {
+            "id": 1,
+            "title": "HTTP Requests Rate",
+            "type": "graph",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "rate(http_requests_total[5m])",
+                    "legendFormat": "{{method}} {{path}}",
+                    "refId": "A"
+                }
+            ],
+            "yaxes": [
+                {
+                    "format": "reqps",
+                    "label": "Requests/sec"
+                },
+                {
+                    "format": "short"
+                }
+            ]
+        },
+        {
+            "id": 2,
+            "title": "HTTP Request Duration (p95)",
+            "type": "graph",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+                    "legendFormat": "{{method}} {{path}}",
+                    "refId": "A"
+                }
+            ],
+            "yaxes": [
+                {
+                    "format": "s",
+                    "label": "Duration"
+                },
+                {
+                    "format": "short"
+                }
+            ]
+        },
+        {
+            "id": 3,
+            "title": "Kafka Messages Consumed",
+            "type": "stat",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 0,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "expr": "kafka_messages_consumed_total",
+                    "refId": "A"
+                }
+            ],
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area"
+            }
+        },
+        {
+            "id": 4,
+            "title": "Kafka Valid Events",
+            "type": "stat",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 6,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "expr": "kafka_valid_events_total",
+                    "refId": "A"
+                }
+            ],
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area"
+            }
+        },
+        {
+            "id": 5,
+            "title": "Kafka Invalid Events",
+            "type": "stat",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 12,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "expr": "sum(kafka_invalid_events_total)",
+                    "refId": "A"
+                }
+            ],
+            "options": {
+                "colorMode": "value",
+                "graphMode": "area"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "value": 0,
+                                "color": "green"
+                            },
+                            {
+                                "value": 10,
+                                "color": "yellow"
+                            },
+                            {
+                                "value": 100,
+                                "color": "red"
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "id": 6,
+            "title": "ClickHouse Insert Duration",
+            "type": "graph",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 14
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.95, rate(clickhouse_insert_duration_seconds_bucket[5m]))",
+                    "legendFormat": "p95",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.50, rate(clickhouse_insert_duration_seconds_bucket[5m]))",
+                    "legendFormat": "p50",
+                    "refId": "B"
+                }
+            ],
+            "yaxes": [
+                {
+                    "format": "s",
+                    "label": "Duration"
+                },
+                {
+                    "format": "short"
+                }
+            ]
+        },
+        {
+            "id": 7,
+            "title": "HTTP Status Codes",
+            "type": "piechart",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 14
+            },
+            "targets": [
+                {
+                    "expr": "sum by (status) (increase(http_requests_total[5m]))",
+                    "legendFormat": "{{status}}",
+                    "refId": "A"
+                }
+            ]
+        }
+    ]
+}

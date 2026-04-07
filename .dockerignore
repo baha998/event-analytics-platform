@@ -1,0 +1,58 @@
+# Airflow
+airflow/logs/
+airflow/__pycache__/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.log
+tmp/
+
+# Build artifacts
+*.exe
+*.test
+*.out
+
+# Dependencies
+vendor/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MinIO data
+minio-data/
+
+# Prometheus data
+prometheus-data/
+
+# Grafana data  
+grafana-data/
+
+# ClickHouse data
+clickhouse-data/
+
+# Postgres data
+postgres-data/
+
+# Loki data
+loki-data/

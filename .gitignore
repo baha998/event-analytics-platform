@@ -1,0 +1,48 @@
+# Binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+main
+go-api
+
+# Test coverage and CI/CD artifacts
+*.out
+coverage.html
+coverage.out
+.golangci-lint-cache/
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Docker volumes data
+clickhouse-data/
+prometheus-data/
+grafana-data/
+loki-data/
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+
+# Temporary files
+tmp/
+temp/
+
+# Deployment directories
+deploy/
+backups/
+bin/

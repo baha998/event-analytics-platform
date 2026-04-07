@@ -1,0 +1,42 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'analytics-mvp'
+    environment: 'development'
+
+# Alertmanager configuration (optional for MVP)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+# Load alerting rules
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Go API service metrics
+  - job_name: 'go-api'
+    static_configs:
+      - targets: ['go-api:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # ClickHouse metrics
+  - job_name: 'clickhouse'
+    static_configs:
+      - targets: ['clickhouse-server:8123']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Kafka JMX metrics (requires JMX exporter setup)
+  # - job_name: 'kafka'
+  #   static_configs:
+  #     - targets: ['kafka:9999']

@@ -1,0 +1,375 @@
+version: '3.8'
+
+services:
+  # Zookeeper - Required for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    ports:
+      - "2181:2181"
+    networks:
+      - analytics-network
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka - Message Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    networks:
+      - analytics-network
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    healthcheck:
+      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ClickHouse - Analytical Database
+  clickhouse-server:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse-server
+    ports:
+      - "8123:8123" # HTTP interface
+      - "9000:9000" # Native client
+    networks:
+      - analytics-network
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse123
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:8123/ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - analytics-network
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:9090/-/healthy" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Grafana - Metrics Visualization
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    networks:
+      - analytics-network
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:3000/api/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Go API Service - Event Processor
+  go-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: go-api
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - analytics-network
+    environment:
+      # Server Configuration
+      SERVER_PORT: "8080"
+      GIN_MODE: "release"
+
+      # Kafka Configuration
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      KAFKA_TOPIC_EVENTS: "events"
+      KAFKA_PRODUCER_TIMEOUT: "10s"
+
+      # ClickHouse Configuration
+      CLICKHOUSE_HOST: "clickhouse-server"
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_HTTP_PORT: "8123"
+      CLICKHOUSE_DATABASE: "analytics"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: "clickhouse123"
+      CLICKHOUSE_MAX_OPEN_CONNS: "10"
+      CLICKHOUSE_MAX_IDLE_CONNS: "5"
+
+      # Application Configuration
+      LOG_LEVEL: "info"
+      LOG_FORMAT: "json"
+      METRICS_ENABLED: "true"
+
+      # JWT Configuration
+      JWT_SECRET_KEY: "your-secret-key-change-in-production"
+      JWT_TOKEN_EXPIRY: "24h"
+      JWT_REFRESH_EXPIRY: "168h"
+
+      # Kafka Consumer Configuration
+      KAFKA_CONSUMER_GROUP: "event-processor"
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:8080/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: loki
+    ports:
+      - "3100:3100"
+    networks:
+      - analytics-network
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:3100/ready" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # Promtail - Log Collector
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: promtail
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks:
+      - analytics-network
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    restart: unless-stopped
+
+  # PostgreSQL - Airflow Metadata Database
+  postgres:
+    image: postgres:14
+    container_name: airflow-postgres
+    networks:
+      - analytics-network
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Airflow Init - Database initialization and admin user creation
+  airflow-init:
+    image: apache/airflow:2.7.3-python3.11
+    container_name: airflow-init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - analytics-network
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin123
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username admin \
+          --password admin123 \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+        echo "Airflow initialization complete"
+
+  # Airflow Webserver - Web UI
+  airflow-webserver:
+    image: apache/airflow:2.7.3-python3.11
+    container_name: airflow-webserver
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8081:8080"
+    networks:
+      - analytics-network
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: webserver
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Airflow Scheduler - Task Scheduler
+  airflow-scheduler:
+    image: apache/airflow:2.7.3-python3.11
+    container_name: airflow-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - analytics-network
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: scheduler
+    healthcheck:
+      test: [ "CMD", "pgrep", "-f", "airflow scheduler" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # MinIO - S3-Compatible Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9002:9002" # API (external:internal)
+      - "9001:9001" # Console
+    networks:
+      - analytics-network
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+networks:
+  analytics-network:
+    driver: bridge
+    name: analytics-network
+
+volumes:
+  clickhouse-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  loki-data:
+    driver: local
+  minio-data:
+    driver: local
+  postgres-data:
+    driver: local

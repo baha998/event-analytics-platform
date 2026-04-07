@@ -1,0 +1,445 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  # Docker registry configuration
+  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  
+  # Go configuration
+  GO_VERSION: "1.24"
+  GOPATH: $CI_PROJECT_DIR/.go
+  
+  # Coverage threshold
+  COVERAGE_THRESHOLD: "70"
+
+# Global cache configuration for Go modules
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .go/pkg/mod/
+    - .cache/
+
+# Before script to set up environment
+before_script:
+  - echo "Pipeline started for $CI_COMMIT_REF_NAME (Commit $CI_COMMIT_SHORT_SHA)"
+
+#############################################
+# TEST STAGE
+#############################################
+
+test:unit:
+  stage: test
+  image: golang:$GO_VERSION-alpine
+  before_script:
+    - apk add --no-cache git make gcc musl-dev
+    - go version
+  script:
+    # Run tests with coverage
+    - echo "Running unit tests with coverage reporting..."
+    - go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+    
+    # Calculate coverage percentage
+    - go tool cover -func=coverage.out | tail -n 1 | awk '{print "Total coverage: " $3}'
+    
+    # Check if coverage meets threshold
+    - |
+      COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+      echo "Coverage: $COVERAGE%"
+      if (( $(echo "$COVERAGE < $COVERAGE_THRESHOLD" | bc -l) )); then
+        echo "ERROR: Coverage $COVERAGE% is below threshold of $COVERAGE_THRESHOLD%"
+        exit 1
+      fi
+    
+    # Generate HTML coverage report
+    - go tool cover -html=coverage.out -o coverage.html
+  
+  artifacts:
+    paths:
+      - coverage.out
+      - coverage.html
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.out
+    expire_in: 30 days
+  
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-test
+    paths:
+      - .go/pkg/mod/
+      - .cache/
+  
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+test:lint:
+  stage: test
+  image: golangci/golangci-lint:v1.55-alpine
+  before_script:
+    - echo "Running golangci-lint..."
+  script:
+    # Run golangci-lint
+    - golangci-lint run --timeout 5m --out-format colored-line-number ./...
+  
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-lint
+    paths:
+      - .go/pkg/mod/
+      - .golangci-lint-cache/
+  
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+  
+  allow_failure: false
+
+#############################################
+# BUILD STAGE
+#############################################
+
+build:docker:
+  stage: build
+  image: docker:24-alpine
+  services:
+    - docker:24-dind
+  
+  before_script:
+    - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  
+  script:
+    # Build Docker image using multi-stage Dockerfile
+    - echo "Building Docker image..."
+    - |
+      docker build \
+        --cache-from $DOCKER_IMAGE:latest \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t $DOCKER_IMAGE:$CI_COMMIT_SHA \
+        -t $DOCKER_IMAGE:latest \
+        -f Dockerfile \
+        .
+    
+    # Push images to registry
+    - echo "Pushing images to registry..."
+    - docker push $DOCKER_IMAGE:$CI_COMMIT_SHA
+    - docker push $DOCKER_IMAGE:latest
+    
+    # Tag with branch name for non-main branches
+    - |
+      if [ "$CI_COMMIT_BRANCH" != "main" ]; then
+        docker tag $DOCKER_IMAGE:$CI_COMMIT_SHA $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG
+        docker push $DOCKER_IMAGE:$CI_COMMIT_REF_SLUG
+      fi
+  
+  dependencies:
+    - test:unit
+  
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_TAG'
+  
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+#############################################
+# DEPLOY STAGE
+#############################################
+
+deploy:staging:
+  stage: deploy
+  image: docker/compose:alpine-1.29.2
+  
+  before_script:
+    - apk add --no-cache bash curl
+    - docker --version
+    - docker-compose --version
+  
+  script:
+    # Create deployment directory
+    - mkdir -p deploy
+    
+    # Copy docker-compose and configuration files
+    - cp docker-compose.yml deploy/
+    - cp -r prometheus grafana loki promtail clickhouse deploy/
+    
+    # Create .env file from CI/CD variables
+    - |
+      cat > deploy/.env <<EOF
+      # Server Configuration
+      SERVER_PORT=8080
+      GIN_MODE=release
+      
+      # Kafka Configuration
+      KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      KAFKA_TOPIC_EVENTS=events
+      
+      # ClickHouse Configuration
+      CLICKHOUSE_HOST=clickhouse-server
+      CLICKHOUSE_PORT=9000
+      CLICKHOUSE_DATABASE=analytics
+      CLICKHOUSE_USER=default
+      CLICKHOUSE_PASSWORD=$CLICKHOUSE_PASSWORD
+      
+      # JWT Configuration
+      JWT_SECRET_KEY=$JWT_SECRET_KEY
+      JWT_TOKEN_EXPIRY=24h
+      
+      # Application Configuration
+      LOG_LEVEL=info
+      LOG_FORMAT=json
+      METRICS_ENABLED=true
+      
+      # Docker Image
+      GO_API_IMAGE=$DOCKER_IMAGE:$CI_COMMIT_SHA
+      EOF
+    
+    # Update docker-compose to use new image
+    - |
+      cd deploy
+      sed -i "s|build:.*|image: $DOCKER_IMAGE:$CI_COMMIT_SHA|g" docker-compose.yml
+      sed -i "/context:/d" docker-compose.yml
+      sed -i "/dockerfile:/d" docker-compose.yml
+    
+    # Save current deployment for rollback
+    - |
+      if [ -f /deployments/current/docker-compose.yml ]; then
+        echo "Backing up current deployment..."
+        cp -r /deployments/current /deployments/backup-$(date +%Y%m%d-%H%M%S)
+      fi
+    
+    # Deploy with docker-compose
+    - echo "Deploying services with commit $CI_COMMIT_SHA..."
+    - docker-compose pull
+    - docker-compose up -d --remove-orphans
+    
+    # Wait for services to be healthy
+    - echo "Waiting for services to be healthy..."
+    - |
+      for i in {1..30}; do
+        if docker-compose ps | grep -q "unhealthy"; then
+          echo "Waiting for services... ($i/30)"
+          sleep 10
+        else
+          echo "All services are healthy!"
+          break
+        fi
+        
+        if [ $i -eq 30 ]; then
+          echo "ERROR: Services failed to become healthy within 5 minutes"
+          echo "Rolling back deployment..."
+          docker-compose down
+          if [ -d /deployments/backup-* ]; then
+            LATEST_BACKUP=$(ls -t /deployments/backup-* | head -1)
+            cp -r $LATEST_BACKUP /deployments/current
+            cd /deployments/current
+            docker-compose up -d
+          fi
+          exit 1
+        fi
+      done
+    
+    # Health check
+    - echo "Running health checks..."
+    - |
+      HEALTH_URL="http://localhost:8080/health"
+      for i in {1..10}; do
+        if curl -f -s $HEALTH_URL | grep -q "ok"; then
+          echo "✓ Health check passed!"
+          break
+        else
+          echo "Health check attempt $i/10 failed, retrying..."
+          sleep 5
+        fi
+        
+        if [ $i -eq 10 ]; then
+          echo "ERROR: Health check failed after 10 attempts"
+          exit 1
+        fi
+      done
+    
+    # Save successful deployment
+    - cp -r . /deployments/current
+    
+    # Show deployment status
+    - docker-compose ps
+    - echo "✓ Deployment completed successfully!"
+  
+  environment:
+    name: staging
+    url: http://staging.example.com
+    on_stop: stop:staging
+  
+  dependencies:
+    - build:docker
+  
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: manual
+  
+  retry:
+    max: 1
+    when: script_failure
+
+deploy:production:
+  stage: deploy
+  image: docker/compose:alpine-1.29.2
+  
+  before_script:
+    - apk add --no-cache bash curl
+  
+  script:
+    # Similar to staging but with production configuration
+    - echo "Deploying to production with commit $CI_COMMIT_SHA..."
+    
+    # Create deployment directory
+    - mkdir -p deploy
+    - cp docker-compose.yml deploy/
+    - cp -r prometheus grafana loki promtail clickhouse deploy/
+    
+    # Create production .env
+    - |
+      cat > deploy/.env <<EOF
+      SERVER_PORT=8080
+      GIN_MODE=release
+      KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      CLICKHOUSE_HOST=clickhouse-server
+      CLICKHOUSE_PASSWORD=$PROD_CLICKHOUSE_PASSWORD
+      JWT_SECRET_KEY=$PROD_JWT_SECRET_KEY
+      LOG_LEVEL=info
+      GO_API_IMAGE=$DOCKER_IMAGE:$CI_COMMIT_SHA
+      EOF
+    
+    # Update docker-compose
+    - |
+      cd deploy
+      sed -i "s|build:.*|image: $DOCKER_IMAGE:$CI_COMMIT_SHA|g" docker-compose.yml
+      sed -i "/context:/d" docker-compose.yml
+      sed -i "/dockerfile:/d" docker-compose.yml
+    
+    # Deploy
+    - docker-compose pull
+    - docker-compose up -d --remove-orphans
+    
+    # Health check
+    - |
+      for i in {1..10}; do
+        if curl -f -s http://localhost:8080/health | grep -q "ok"; then
+          echo "✓ Production health check passed!"
+          break
+        fi
+        sleep 5
+      done
+    
+    - docker-compose ps
+  
+  environment:
+    name: production
+    url: http://production.example.com
+  
+  dependencies:
+    - build:docker
+  
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  
+  allow_failure: false
+
+stop:staging:
+  stage: deploy
+  image: docker/compose:alpine-1.29.2
+  script:
+    - docker-compose down
+  environment:
+    name: staging
+    action: stop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: manual
+
+#############################################
+# NOTIFICATION
+#############################################
+
+.notify_slack:
+  image: curlimages/curl:latest
+  script:
+    - |
+      if [ -n "$SLACK_WEBHOOK_URL" ]; then
+        STATUS_EMOJI=":white_check_mark:"
+        STATUS_COLOR="good"
+        STATUS_TEXT="SUCCESS"
+        
+        if [ "$CI_JOB_STATUS" != "success" ]; then
+          STATUS_EMOJI=":x:"
+          STATUS_COLOR="danger"
+          STATUS_TEXT="FAILED"
+        fi
+        
+        curl -X POST "$SLACK_WEBHOOK_URL" \
+          -H 'Content-Type: application/json' \
+          -d "{
+            \"username\": \"GitLab CI\",
+            \"icon_emoji\": \":gitlab:\",
+            \"attachments\": [{
+              \"color\": \"$STATUS_COLOR\",
+              \"title\": \"Pipeline $STATUS_TEXT $STATUS_EMOJI\",
+              \"fields\": [
+                {
+                  \"title\": \"Project\",
+                  \"value\": \"$CI_PROJECT_NAME\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Branch\",
+                  \"value\": \"$CI_COMMIT_REF_NAME\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Commit\",
+                  \"value\": \"<$CI_PROJECT_URL/-/commit/$CI_COMMIT_SHA|$CI_COMMIT_SHORT_SHA>\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Author\",
+                  \"value\": \"$GITLAB_USER_NAME\",
+                  \"short\": true
+                },
+                {
+                  \"title\": \"Pipeline\",
+                  \"value\": \"<$CI_PIPELINE_URL|#$CI_PIPELINE_ID>\",
+                  \"short\": false
+                }
+              ],
+              \"footer\": \"GitLab CI\",
+              \"ts\": $(date +%s)
+            }]
+          }"
+      fi
+
+notify:success:
+  extends: .notify_slack
+  stage: .post
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+      when: on_success
+
+notify:failure:
+  extends: .notify_slack
+  stage: .post
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+      when: on_failure

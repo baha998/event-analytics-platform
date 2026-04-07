@@ -1,0 +1,145 @@
+{
+    "title": "Event Analytics Dashboard",
+    "tags": [
+        "events",
+        "analytics"
+    ],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 0,
+    "refresh": "30s",
+    "panels": [
+        {
+            "id": 1,
+            "title": "Total Events Count",
+            "type": "stat",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 0,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "rawSql": "SELECT count(*) as value FROM analytics.events",
+                    "format": "table",
+                    "datasource": {
+                        "type": "grafana-clickhouse-datasource",
+                        "uid": "clickhouse"
+                    }
+                }
+            ],
+            "options": {
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "auto"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short"
+                }
+            }
+        },
+        {
+            "id": 2,
+            "title": "Events Per Minute",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 18,
+                "x": 6,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "rawSql": "SELECT toStartOfMinute(toDateTime(timestamp)) as time, count(*) as events FROM analytics.events WHERE timestamp >= $__fromTime AND timestamp <= $__toTime GROUP BY time ORDER BY time",
+                    "format": "time_series",
+                    "datasource": {
+                        "type": "grafana-clickhouse-datasource",
+                        "uid": "clickhouse"
+                    }
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth"
+                    }
+                }
+            }
+        },
+        {
+            "id": 3,
+            "title": "Top Pages by Clicks",
+            "type": "bargauge",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "rawSql": "SELECT page_url, count(*) as clicks FROM analytics.events GROUP BY page_url ORDER BY clicks DESC LIMIT 10",
+                    "format": "table",
+                    "datasource": {
+                        "type": "grafana-clickhouse-datasource",
+                        "uid": "clickhouse"
+                    }
+                }
+            ],
+            "options": {
+                "orientation": "horizontal",
+                "displayMode": "gradient"
+            }
+        },
+        {
+            "id": 4,
+            "title": "Events by Hour",
+            "type": "barchart",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "rawSql": "SELECT toHour(toDateTime(timestamp)) as hour, count(*) as events FROM analytics.events GROUP BY hour ORDER BY hour",
+                    "format": "table",
+                    "datasource": {
+                        "type": "grafana-clickhouse-datasource",
+                        "uid": "clickhouse"
+                    }
+                }
+            ]
+        },
+        {
+            "id": 5,
+            "title": "Recent Events",
+            "type": "table",
+            "gridPos": {
+                "h": 8,
+                "w": 24,
+                "x": 0,
+                "y": 16
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "rawSql": "SELECT event_id, toDateTime(timestamp) as time, page_url, user_id FROM analytics.events ORDER BY timestamp DESC LIMIT 20",
+                    "format": "table",
+                    "datasource": {
+                        "type": "grafana-clickhouse-datasource",
+                        "uid": "clickhouse"
+                    }
+                }
+            ]
+        }
+    ]
+}

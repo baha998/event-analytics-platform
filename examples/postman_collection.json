@@ -1,0 +1,87 @@
+{
+  "info": {
+    "name": "Real-Time Analytics API",
+    "_postman_id": "9f5bb2b6-0000-4c1d-9b8b-collection",
+    "description": "Sample requests for JWT auth, admin actions, query proxy, and metrics.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth - Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"admin123\"\n}"
+        },
+        "url": "{{baseUrl}}/api/auth/login"
+      }
+    },
+    {
+      "name": "Admin - Create Source",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"topic\": \"events\",\n  \"count\": 50,\n  \"interval\": 100\n}"
+        },
+        "url": "{{baseUrl}}/api/sources"
+      }
+    },
+    {
+      "name": "Admin - Trigger Processing",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"metric_name\": \"click_count\",\n  \"date\": \"2025-01-01\"\n}"
+        },
+        "url": "{{baseUrl}}/api/process"
+      }
+    },
+    {
+      "name": "Viewer - Query Proxy",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/query?sql=SELECT%20page_url,%20count()%20AS%20clicks%20FROM%20events%20GROUP%20BY%20page_url%20LIMIT%2010",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "query"],
+          "query": [
+            {
+              "key": "sql",
+              "value": "SELECT page_url, count() AS clicks FROM events GROUP BY page_url LIMIT 10"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Public - Metrics",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/metrics"
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "jwtToken", "value": "" }
+  ]
+}
+

@@ -1,0 +1,64 @@
+groups:
+  - name: api_alerts
+    interval: 30s
+    rules:
+      # Alert when API latency p99 exceeds 1 second
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API latency detected"
+          description: "API p99 latency is {{ $value }}s (threshold: 1s) for endpoint {{ $labels.endpoint }}"
+
+  - name: kafka_alerts
+    interval: 30s
+    rules:
+      # Alert when Kafka consumer lag exceeds 1000 messages
+      - alert: HighKafkaLag
+        expr: kafka_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "High Kafka consumer lag detected"
+          description: "Kafka lag is {{ $value }} messages (threshold: 1000) for topic {{ $labels.topic }} partition {{ $labels.partition }}"
+
+  - name: service_alerts
+    interval: 30s
+    rules:
+      # Alert when a service is down
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service {{ $labels.job }} on instance {{ $labels.instance }} has been down for more than 1 minute"
+
+      # Alert when Go API service is unreachable
+      - alert: GoAPIDown
+        expr: up{job="go-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Go API service is down"
+          description: "Go API service has been unreachable for more than 1 minute"
+
+      # Alert on high aggregation error rate
+      - alert: HighAggregationErrors
+        expr: rate(aggregation_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: processor
+        annotations:
+          summary: "High aggregation error rate"
+          description: "Aggregation error rate is {{ $value }} errors/second (threshold: 0.1/s)"
