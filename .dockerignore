@@ -56,3 +56,11 @@ postgres-data/
 
 # Loki data
 loki-data/
+
+airflow/logs/
+airflow/_logs/
+analytics-api
+__pycache__/
+.go-cache/
+
+.compose.*.json

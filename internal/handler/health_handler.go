@@ -58,7 +58,22 @@ func (h *HealthHandler) Health(c *gin.Context) {
 	}
 
 	// Always return 200 for Docker/Kubernetes health checks
-	// Use /health/ready endpoint if you need a strict readiness check
+	// /health/ready checks storage readiness separately.
 	c.JSON(http.StatusOK, response)
 }
 
+// Ready fails when storage is unavailable. Kafka delivery failures are retried
+// by the consumer and reported through logs and metrics.
+func (h *HealthHandler) Ready(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	if h.repo == nil {
+		c.JSON(503, gin.H{"status": "not_ready"})
+		return
+	}
+	if err := h.repo.Ping(ctx); err != nil {
+		c.JSON(503, gin.H{"status": "not_ready"})
+		return
+	}
+	c.JSON(200, gin.H{"status": "ready"})
+}

@@ -80,7 +80,7 @@ func ExampleBatchProcessing(clickHouseConn clickhouse.Conn, logger zerolog.Logge
 	ctx := context.Background()
 	yesterday := time.Now().AddDate(0, 0, -1)
 
-	if err := batchProc.ProcessDailyAggregation(ctx, yesterday, "transaction_sum"); err != nil {
+	if err := batchProc.ProcessDailyAggregation(ctx, yesterday, "transaction_count"); err != nil {
 		logger.Error().Err(err).Msg("Failed to process daily aggregation")
 		return
 	}
@@ -107,14 +107,14 @@ func ExampleCronScheduledBatchProcessing(clickHouseConn clickhouse.Conn, logger 
 	scheduler := processor.NewCronScheduler(batchProc, logger)
 
 	// Schedule daily aggregation at 1 AM every day
-	// Cron format: "0 1 * * *" (minute hour day month weekday)
-	if err := scheduler.ScheduleDailyAggregation("0 1 * * *", "transaction_sum"); err != nil {
+	// Cron format: "0 0 1 * * *" (second minute hour day month weekday)
+	if err := scheduler.ScheduleDailyAggregation("0 0 1 * * *", "transaction_count"); err != nil {
 		logger.Error().Err(err).Msg("Failed to schedule daily aggregation")
 		return
 	}
 
 	// Schedule another job for click metrics at 2 AM
-	if err := scheduler.ScheduleDailyAggregation("0 2 * * *", "click_count"); err != nil {
+	if err := scheduler.ScheduleDailyAggregation("0 0 2 * * *", "click_count"); err != nil {
 		logger.Error().Err(err).Msg("Failed to schedule click aggregation")
 		return
 	}
@@ -124,7 +124,7 @@ func ExampleCronScheduledBatchProcessing(clickHouseConn clickhouse.Conn, logger 
 	defer scheduler.Stop()
 
 	logger.Info().Msg("Cron scheduled batch processing example started")
-	
+
 	// Keep running (in real application, this would be part of main loop)
 	time.Sleep(5 * time.Second)
 }
@@ -155,7 +155,7 @@ func ExampleMultipleAggregations(clickHouseConn clickhouse.Conn, logger zerolog.
 		FlushInterval:   1 * time.Minute,
 		WorkerCount:     5,
 		EnableMetrics:   true,
-		MetricName:      "transaction_sum_by_user",
+		MetricName:      "transaction_count_by_user",
 		AggregationType: aggregation.AggregationSum,
 		DimensionExtractor: func(event *kafka.Event) string {
 			return event.UserID
@@ -183,4 +183,3 @@ func ExampleMultipleAggregations(clickHouseConn clickhouse.Conn, logger zerolog.
 
 	logger.Info().Msg("Multiple aggregations example started")
 }
-

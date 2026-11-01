@@ -20,14 +20,16 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o main ./cmd/api
 
 # Final stage
-FROM alpine:latest
+FROM alpine:3.21
 
 RUN apk --no-cache add ca-certificates wget
 
-WORKDIR /root/
+RUN adduser -D -u 10001 app
+WORKDIR /app
 
 # Copy the binary from builder
 COPY --from=builder /build/main .
+USER app
 
 # Expose port
 EXPOSE 8080

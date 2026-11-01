@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS analytics.metrics
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (timestamp, metric_name, dimensions)
+ORDER BY (timestamp, metric_name, dimensions['dimension'])
 SETTINGS index_granularity = 8192;
 
 -- Create secondary indexes for common queries

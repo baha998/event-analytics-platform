@@ -46,3 +46,11 @@ temp/
 deploy/
 backups/
 bin/
+
+/analytics-api
+__pycache__/
+*.py[cod]
+
+airflow/_logs/
+
+.compose.*.json

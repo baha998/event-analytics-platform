@@ -26,7 +26,7 @@ func PrometheusMiddleware() gin.HandlerFunc {
 		endpoint := c.FullPath()
 
 		if endpoint == "" {
-			endpoint = c.Request.URL.Path
+			endpoint = "unmatched"
 		}
 
 		statusStr := strconv.Itoa(status)

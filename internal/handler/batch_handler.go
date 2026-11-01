@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"devops-fall2025-23b031152/internal/batch"
+	"devops-fall2025-23b031152/internal/processor"
 	"devops-fall2025-23b031152/internal/repository"
 	"devops-fall2025-23b031152/internal/storage"
 	"devops-fall2025-23b031152/pkg/metrics"
@@ -20,27 +21,30 @@ import (
 
 // BatchHandler handles batch processing REST API endpoints
 type BatchHandler struct {
-	exporter    *batch.Exporter
-	repo        *repository.ClickHouseRepository
-	minioClient *storage.MinIOClient
-	auditRepo   *repository.AuditRepository
-	log         zerolog.Logger
+	batchProcessor *processor.BatchProcessor
+	exporter       *batch.Exporter
+	repo           *repository.ClickHouseRepository
+	minioClient    *storage.MinIOClient
+	auditRepo      *repository.AuditRepository
+	log            zerolog.Logger
 }
 
 // NewBatchHandler creates a new batch handler
 func NewBatchHandler(
 	exporter *batch.Exporter,
+	batchProcessor *processor.BatchProcessor,
 	repo *repository.ClickHouseRepository,
 	minioClient *storage.MinIOClient,
 	auditRepo *repository.AuditRepository,
 	log zerolog.Logger,
 ) *BatchHandler {
 	return &BatchHandler{
-		exporter:    exporter,
-		repo:        repo,
-		minioClient: minioClient,
-		auditRepo:   auditRepo,
-		log:         log,
+		exporter:       exporter,
+		batchProcessor: batchProcessor,
+		repo:           repo,
+		minioClient:    minioClient,
+		auditRepo:      auditRepo,
+		log:            log,
 	}
 }
 
@@ -53,7 +57,7 @@ func (h *BatchHandler) ExportBatchEvents(c *gin.Context) {
 
 	// Call the exporter to export yesterday's events
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	
+
 	// Track duration with Prometheus
 	defer func() {
 		duration := time.Since(startTime).Seconds()
@@ -81,13 +85,13 @@ func (h *BatchHandler) ExportBatchEvents(c *gin.Context) {
 	}
 
 	fileName := fmt.Sprintf("date=%s/events.parquet", yesterday)
-	
+
 	h.log.Info().
 		Int64("exported_rows", exportedRows).
 		Str("file", fileName).
 		Msg("Batch export completed successfully")
 
-	h.writeAudit(c, "batch_export", "/api/batch/export", "success", 
+	h.writeAudit(c, "batch_export", "/api/batch/export", "success",
 		fmt.Sprintf("rows=%d file=%s", exportedRows, fileName))
 
 	respondSuccess(c, http.StatusOK, gin.H{
@@ -102,23 +106,12 @@ func (h *BatchHandler) ExportBatchEvents(c *gin.Context) {
 func (h *BatchHandler) AggregateBatchData(c *gin.Context) {
 	h.log.Info().Msg("Starting batch aggregation")
 
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-
-	// For now, this is a stub implementation
-	metrics := []string{"clicks_by_page", "transactions_by_user"}
-
-	h.log.Info().
-		Str("date", yesterday).
-		Strs("metrics", metrics).
-		Msg("Batch aggregation completed (stub)")
-
-	h.writeAudit(c, "batch_aggregate", "/api/batch/aggregate", "success", 
-		fmt.Sprintf("date=%s metrics=%v", yesterday, metrics))
-
-	respondSuccess(c, http.StatusOK, gin.H{
-		"status":              "success",
-		"aggregated_metrics": metrics,
-	})
+	yesterday := time.Now().UTC().AddDate(0, 0, -1)
+	if err := h.batchProcessor.ProcessDailyAggregation(c.Request.Context(), yesterday, "click_count"); err != nil {
+		respondError(c, 500, "aggregation_failed", "Aggregation failed", nil)
+		return
+	}
+	respondSuccess(c, 200, gin.H{"status": "success", "metric": "click_count_daily_summary"})
 }
 
 // CleanupTempFiles handles POST /api/batch/cleanup (admin only)
@@ -139,7 +132,7 @@ func (h *BatchHandler) CleanupTempFiles(c *gin.Context) {
 
 	h.log.Info().Int("deleted_files", deletedCount).Msg("Temp file cleanup completed")
 
-	h.writeAudit(c, "cleanup_temp", "/api/batch/cleanup", "success", 
+	h.writeAudit(c, "cleanup_temp", "/api/batch/cleanup", "success",
 		fmt.Sprintf("deleted=%d", deletedCount))
 
 	respondSuccess(c, http.StatusOK, gin.H{
@@ -161,7 +154,7 @@ func (h *BatchHandler) CleanupOldEvents(c *gin.Context) {
 	h.log.Info().Int("days", days).Msg("Starting old events cleanup")
 
 	cutoffDate := time.Now().AddDate(0, 0, -days)
-	
+
 	// Delete events older than cutoff date
 	deletedRows, err := h.deleteOldEvents(c.Request.Context(), cutoffDate)
 	if err != nil {
@@ -176,7 +169,7 @@ func (h *BatchHandler) CleanupOldEvents(c *gin.Context) {
 		Int64("deleted_rows", deletedRows).
 		Msg("Old events cleanup completed")
 
-	h.writeAudit(c, "cleanup_events", "/api/cleanup/events", "success", 
+	h.writeAudit(c, "cleanup_events", "/api/cleanup/events", "success",
 		fmt.Sprintf("days=%d rows=%d", days, deletedRows))
 
 	respondSuccess(c, http.StatusOK, gin.H{
@@ -198,7 +191,7 @@ func (h *BatchHandler) CleanupMinIOFiles(c *gin.Context) {
 	h.log.Info().Int("days", days).Msg("Starting MinIO files cleanup")
 
 	cutoffDate := time.Now().AddDate(0, 0, -days)
-	
+
 	// Delete old Parquet files from MinIO
 	deletedObjects, err := h.deleteOldMinIOFiles(c.Request.Context(), cutoffDate)
 	if err != nil {
@@ -213,7 +206,7 @@ func (h *BatchHandler) CleanupMinIOFiles(c *gin.Context) {
 		Int("deleted_objects", deletedObjects).
 		Msg("MinIO files cleanup completed")
 
-	h.writeAudit(c, "cleanup_minio", "/api/cleanup/minio", "success", 
+	h.writeAudit(c, "cleanup_minio", "/api/cleanup/minio", "success",
 		fmt.Sprintf("days=%d objects=%d", days, deletedObjects))
 
 	respondSuccess(c, http.StatusOK, gin.H{
@@ -251,30 +244,8 @@ func (h *BatchHandler) writeAudit(c *gin.Context, action, resource, status, deta
 func (h *BatchHandler) getEventCountForDate(date string) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	// Use ProxyQuery which returns maps
-	results, err := h.repo.ProxyQuery(ctx, fmt.Sprintf("SELECT count(*) as count FROM events WHERE toDate(timestamp) = '%s' LIMIT 1", date))
-	if err != nil {
-		return 0, fmt.Errorf("failed to query event count: %w", err)
-	}
-
-	if len(results) == 0 {
-		return 0, nil
-	}
-
-	// Extract count from result map
-	countVal, ok := results[0]["count"]
-	if !ok {
-		return 0, fmt.Errorf("count field not found in result")
-	}
-
-	// Convert to int64
-	count, ok := countVal.(uint64)
-	if !ok {
-		return 0, fmt.Errorf("invalid count type: %T", countVal)
-	}
-
-	return int64(count), nil
+	count, err := h.repo.CountEventsOnDate(ctx, date)
+	return int64(count), err
 }
 
 func (h *BatchHandler) cleanupLocalFiles(dir, pattern string) (int, error) {
@@ -296,17 +267,16 @@ func (h *BatchHandler) cleanupLocalFiles(dir, pattern string) (int, error) {
 }
 
 func (h *BatchHandler) deleteOldEvents(ctx context.Context, cutoffDate time.Time) (int64, error) {
-	// For now, this is a stub implementation
-	h.log.Info().Time("cutoff", cutoffDate).Msg("Would delete events older than cutoff (stub)")
-	
-	// Return stub data
-	return 50000, nil
+	count, err := h.repo.DeleteEventsBefore(ctx, cutoffDate)
+	return int64(count), err
 }
-
 func (h *BatchHandler) deleteOldMinIOFiles(ctx context.Context, cutoffDate time.Time) (int, error) {
-	// For now, this is a stub implementation
-	h.log.Info().Time("cutoff", cutoffDate).Msg("Would delete MinIO files older than cutoff (stub)")
-	
-	// Return stub data
-	return 25, nil
+	return h.minioClient.DeleteBefore(ctx, "events", cutoffDate)
+}
+func (h *BatchHandler) Optimize(c *gin.Context) {
+	if err := h.repo.Optimize(c.Request.Context()); err != nil {
+		respondError(c, 500, "optimize_failed", "Optimization failed", nil)
+		return
+	}
+	respondSuccess(c, 200, gin.H{"status": "success"})
 }

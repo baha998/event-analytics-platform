@@ -1,16 +1,17 @@
-version: '3.8'
-
 services:
   # Zookeeper - Required for Kafka
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
       ZOOKEEPER_SYNC_LIMIT: 2
     ports:
-      - "2181:2181"
+      - "127.0.0.1:2181:2181"
     networks:
       - analytics-network
     healthcheck:
@@ -23,15 +24,18 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     depends_on:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:29092:29092"
     networks:
       - analytics-network
     environment:
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
@@ -55,14 +59,14 @@ services:
     image: clickhouse/clickhouse-server:23.8
     container_name: clickhouse-server
     ports:
-      - "8123:8123" # HTTP interface
-      - "9000:9000" # Native client
+      - "127.0.0.1:8123:8123" # HTTP interface
+      - "127.0.0.1:9000:9000" # Native client
     networks:
       - analytics-network
     environment:
       CLICKHOUSE_DB: analytics
       CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: clickhouse123
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse123}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse-data:/var/lib/clickhouse
@@ -79,12 +83,27 @@ services:
       retries: 5
       start_period: 20s
 
+  # Idempotent bootstrap also handles existing volumes without dropping data.
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:23.8
+    depends_on:
+      clickhouse-server:
+        condition: service_healthy
+    networks: [analytics-network]
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse123}
+    volumes:
+      - ./clickhouse/init:/schema:ro
+      - ./clickhouse/bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+
   # Prometheus - Metrics Collection
   prometheus:
+    profiles: [monitoring]
     image: prom/prometheus:v2.47.0
     container_name: prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - analytics-network
     volumes:
@@ -105,6 +124,7 @@ services:
 
   # Grafana - Metrics Visualization
   grafana:
+    profiles: [monitoring]
     image: grafana/grafana:10.1.0
     container_name: grafana
     depends_on:
@@ -113,13 +133,14 @@ services:
       loki:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - analytics-network
     environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse123}
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin123
-      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource 4.14.0
       GF_SERVER_ROOT_URL: http://localhost:3000
       GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
@@ -139,48 +160,61 @@ services:
       dockerfile: Dockerfile
     container_name: go-api
     depends_on:
+      clickhouse-init:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
       clickhouse-server:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     networks:
       - analytics-network
     environment:
       # Server Configuration
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-admin123}
       SERVER_PORT: "8080"
       GIN_MODE: "release"
 
       # Kafka Configuration
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       KAFKA_TOPIC_EVENTS: "events"
-      KAFKA_PRODUCER_TIMEOUT: "10s"
 
       # ClickHouse Configuration
       CLICKHOUSE_HOST: "clickhouse-server"
       CLICKHOUSE_PORT: "9000"
-      CLICKHOUSE_HTTP_PORT: "8123"
       CLICKHOUSE_DATABASE: "analytics"
       CLICKHOUSE_USER: "default"
-      CLICKHOUSE_PASSWORD: "clickhouse123"
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse123}
       CLICKHOUSE_MAX_OPEN_CONNS: "10"
       CLICKHOUSE_MAX_IDLE_CONNS: "5"
 
       # Application Configuration
-      LOG_LEVEL: "info"
-      LOG_FORMAT: "json"
-      METRICS_ENABLED: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Set AUTH_ADMIN_PASSWORD in .env}
+      AUTH_VIEWER_USERNAME: ${AUTH_VIEWER_USERNAME:-viewer}
+      AUTH_VIEWER_PASSWORD: ${AUTH_VIEWER_PASSWORD:?Set AUTH_VIEWER_PASSWORD in .env}
+      GRAFANA_ORIGIN: ${GRAFANA_ORIGIN:-http://localhost:3000}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-100}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-120}
+      PROCESSOR_WINDOW_DURATION: ${PROCESSOR_WINDOW_DURATION:-1m}
+      PROCESSOR_FLUSH_INTERVAL: ${PROCESSOR_FLUSH_INTERVAL:-10s}
+      PROCESSOR_CRON_SCHEDULE: ${PROCESSOR_CRON_SCHEDULE:-0 0 1 * * *}
+      PROCESSOR_ENABLE_METRICS: ${PROCESSOR_ENABLE_METRICS:-true}
 
       # JWT Configuration
-      JWT_SECRET_KEY: "your-secret-key-change-in-production"
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Copy .env.example to .env and set JWT_SECRET_KEY}
       JWT_TOKEN_EXPIRY: "24h"
       JWT_REFRESH_EXPIRY: "168h"
 
       # Kafka Consumer Configuration
       KAFKA_CONSUMER_GROUP: "event-processor"
     healthcheck:
-      test: [ "CMD", "wget", "--spider", "-q", "localhost:8080/health" ]
+      test: [ "CMD", "wget", "--spider", "-q", "localhost:8080/health/ready" ]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -189,10 +223,11 @@ services:
 
   # Loki - Log Aggregation
   loki:
+    profiles: [monitoring]
     image: grafana/loki:2.9.0
     container_name: loki
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     networks:
       - analytics-network
     volumes:
@@ -208,6 +243,7 @@ services:
 
   # Promtail - Log Collector
   promtail:
+    profiles: [monitoring]
     image: grafana/promtail:2.9.0
     container_name: promtail
     depends_on:
@@ -224,6 +260,7 @@ services:
 
   # PostgreSQL - Airflow Metadata Database
   postgres:
+    profiles: [batch]
     image: postgres:14
     container_name: airflow-postgres
     networks:
@@ -243,6 +280,7 @@ services:
 
   # Airflow Init - Database initialization and admin user creation
   airflow-init:
+    profiles: [batch]
     image: apache/airflow:2.7.3-python3.11
     container_name: airflow-init
     depends_on:
@@ -251,6 +289,8 @@ services:
     networks:
       - analytics-network
     environment:
+      AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Set AUTH_ADMIN_PASSWORD in .env}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
@@ -266,6 +306,7 @@ services:
     command:
       - -c
       - |
+        set -e
         airflow db migrate
         airflow users create \
           --username admin \
@@ -278,6 +319,7 @@ services:
 
   # Airflow Webserver - Web UI
   airflow-webserver:
+    profiles: [batch]
     image: apache/airflow:2.7.3-python3.11
     container_name: airflow-webserver
     depends_on:
@@ -286,10 +328,12 @@ services:
       airflow-init:
         condition: service_completed_successfully
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     networks:
       - analytics-network
     environment:
+      AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Set AUTH_ADMIN_PASSWORD in .env}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
@@ -297,7 +341,7 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
     volumes:
       - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/_logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
     command: webserver
     healthcheck:
@@ -310,6 +354,7 @@ services:
 
   # Airflow Scheduler - Task Scheduler
   airflow-scheduler:
+    profiles: [batch]
     image: apache/airflow:2.7.3-python3.11
     container_name: airflow-scheduler
     depends_on:
@@ -320,6 +365,8 @@ services:
     networks:
       - analytics-network
     environment:
+      AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Set AUTH_ADMIN_PASSWORD in .env}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__FERNET_KEY: 'Zp3fJ8mNqR5tVwYx2B4cF6gH9jKlMnPqSsUtVxWzA0C='
@@ -327,11 +374,11 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
     volumes:
       - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/_logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
     command: scheduler
     healthcheck:
-      test: [ "CMD", "pgrep", "-f", "airflow scheduler" ]
+      test: [ "CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $${HOSTNAME}" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -340,16 +387,17 @@ services:
 
   # MinIO - S3-Compatible Object Storage
   minio:
-    image: minio/minio:latest
+    profiles: [storage, batch]
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     container_name: minio
     ports:
-      - "9002:9002" # API (external:internal)
-      - "9001:9001" # Console
+      - "127.0.0.1:9002:9000" # API (external:internal)
+      - "127.0.0.1:9001:9001" # Console
     networks:
       - analytics-network
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: admin123
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-admin123}
     volumes:
       - minio-data:/data
     command: server /data --console-address ":9001"
@@ -361,6 +409,9 @@ networks:
     name: analytics-network
 
 volumes:
+  kafka-data:
+  zookeeper-data:
+  zookeeper-log:
   clickhouse-data:
     driver: local
   prometheus-data:

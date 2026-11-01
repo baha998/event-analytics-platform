@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -20,6 +21,7 @@ type BatchProcessorConfig struct {
 
 // BatchProcessor handles daily historical aggregations
 type BatchProcessor struct {
+	mu          sync.Mutex
 	config      BatchProcessorConfig
 	metricsRepo *repository.MetricsRepository
 	workerPool  *workerpool.WorkerPool
@@ -54,6 +56,8 @@ func (bp *BatchProcessor) Start() {
 
 // ProcessDailyAggregation processes daily aggregation for a specific date
 func (bp *BatchProcessor) ProcessDailyAggregation(ctx context.Context, date time.Time, metricName string) error {
+	bp.mu.Lock()
+	defer bp.mu.Unlock()
 	start := time.Now()
 
 	bp.log.Info().
@@ -91,7 +95,7 @@ func (bp *BatchProcessor) ProcessDailyAggregation(ctx context.Context, date time
 	}
 
 	// Store in ClickHouse
-	if err := bp.metricsRepo.BatchInsertMetrics(ctx, summaryMetrics); err != nil {
+	if err := bp.metricsRepo.ReplaceDailySummary(ctx, date, summaryMetricName, summaryMetrics); err != nil {
 		bp.log.Error().Err(err).
 			Time("date", date).
 			Msg("Failed to store daily aggregation")

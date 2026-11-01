@@ -70,14 +70,16 @@ func (ps *ProcessingService) ProcessKafkaEventBatch(events []*kafka.Event) error
 func SetupClickStreamProcessor(
 	metricsRepo *repository.MetricsRepository,
 	windowDuration time.Duration,
+	flushInterval time.Duration,
 	workerCount int,
+	enableMetrics bool,
 	log zerolog.Logger,
 ) *processor.StreamProcessor {
 	config := processor.StreamProcessorConfig{
 		WindowDuration:  windowDuration,
-		FlushInterval:   windowDuration,
+		FlushInterval:   flushInterval,
 		WorkerCount:     workerCount,
-		EnableMetrics:   true,
+		EnableMetrics:   enableMetrics,
 		MetricName:      "click_count",
 		AggregationType: aggregation.AggregationCount,
 		DimensionExtractor: func(event *kafka.Event) string {
@@ -93,15 +95,17 @@ func SetupClickStreamProcessor(
 func SetupTransactionStreamProcessor(
 	metricsRepo *repository.MetricsRepository,
 	windowDuration time.Duration,
+	flushInterval time.Duration,
 	workerCount int,
+	enableMetrics bool,
 	log zerolog.Logger,
 ) *processor.StreamProcessor {
 	config := processor.StreamProcessorConfig{
 		WindowDuration:  windowDuration,
-		FlushInterval:   windowDuration,
+		FlushInterval:   flushInterval,
 		WorkerCount:     workerCount,
-		EnableMetrics:   true,
-		MetricName:      "transaction_sum",
+		EnableMetrics:   enableMetrics,
+		MetricName:      "transaction_count",
 		AggregationType: aggregation.AggregationSum,
 		DimensionExtractor: func(event *kafka.Event) string {
 			// Group by user_id

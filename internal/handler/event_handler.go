@@ -4,8 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"regexp"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,7 +19,6 @@ import (
 // EventHandler handles HTTP requests for events
 type EventHandler struct {
 	service        *service.EventService
-	repo           *repository.ClickHouseRepository
 	auditRepo      *repository.AuditRepository
 	batchProcessor *processor.BatchProcessor
 	validate       *validator.Validate
@@ -30,14 +28,12 @@ type EventHandler struct {
 // NewEventHandler creates a new event handler
 func NewEventHandler(
 	eventService *service.EventService,
-	repo *repository.ClickHouseRepository,
 	batchProcessor *processor.BatchProcessor,
 	auditRepo *repository.AuditRepository,
 	log zerolog.Logger,
 ) *EventHandler {
 	return &EventHandler{
 		service:        eventService,
-		repo:           repo,
 		batchProcessor: batchProcessor,
 		auditRepo:      auditRepo,
 		validate:       validator.New(),
@@ -58,6 +54,11 @@ func (h *EventHandler) CreateSource(c *gin.Context) {
 		return
 	}
 
+	if err := h.service.ValidateSource(&req); err != nil {
+		respondError(c, 400, "validation_error", err.Error(), nil)
+		return
+	}
+
 	if err := h.service.CreateSource(c.Request.Context(), &req); err != nil {
 		h.log.Error().Err(err).Msg("Failed to create source")
 		h.writeAudit(c, "create_source", "/api/sources", "failed", err.Error())
@@ -67,8 +68,8 @@ func (h *EventHandler) CreateSource(c *gin.Context) {
 
 	h.writeAudit(c, "create_source", "/api/sources", "success", fmt.Sprintf("topic=%s count=%d", req.Topic, req.Count))
 
-	respondSuccess(c, http.StatusAccepted, gin.H{
-		"message": "Source creation initiated",
+	respondSuccess(c, http.StatusCreated, gin.H{
+		"message": "Events published",
 		"topic":   req.Topic,
 		"count":   req.Count,
 	})
@@ -77,7 +78,7 @@ func (h *EventHandler) CreateSource(c *gin.Context) {
 // TriggerProcessing handles POST /api/process
 func (h *EventHandler) TriggerProcessing(c *gin.Context) {
 	type processRequest struct {
-		MetricName string `json:"metric_name" validate:"required,oneof=click_count transaction_sum"`
+		MetricName string `json:"metric_name" validate:"required,oneof=click_count transaction_count"`
 		Date       string `json:"date,omitempty" validate:"omitempty,datetime=2006-01-02"`
 	}
 
@@ -102,17 +103,15 @@ func (h *EventHandler) TriggerProcessing(c *gin.Context) {
 		runDate = d
 	}
 
-	go func(date time.Time, metric string) {
-		ctx := context.Background()
-		if err := h.batchProcessor.ProcessDailyAggregation(ctx, date, metric); err != nil {
-			h.log.Error().Err(err).Msg("Processing job failed")
-		}
-	}(runDate, req.MetricName)
+	if err := h.batchProcessor.ProcessDailyAggregation(c.Request.Context(), runDate, req.MetricName); err != nil {
+		respondError(c, 500, "processing_failed", "Daily aggregation failed", nil)
+		return
+	}
 
 	h.writeAudit(c, "trigger_processing", "/api/process", "success", fmt.Sprintf("metric=%s date=%s", req.MetricName, runDate.Format("2006-01-02")))
 
-	respondSuccess(c, http.StatusAccepted, gin.H{
-		"message":     "Processing job triggered",
+	respondSuccess(c, http.StatusOK, gin.H{
+		"message":     "Daily aggregation completed",
 		"metric_name": req.MetricName,
 		"date":        runDate.Format("2006-01-02"),
 	})
@@ -120,28 +119,41 @@ func (h *EventHandler) TriggerProcessing(c *gin.Context) {
 
 // QueryEvents handles GET /api/query by proxying validated SQL
 func (h *EventHandler) QueryEvents(c *gin.Context) {
-	sqlQuery := c.Query("sql")
-	if sqlQuery == "" {
-		respondError(c, http.StatusBadRequest, "validation_error", "sql parameter is required", nil)
+	var req repository.QueryRequest
+	var err error
+	if v := c.Query("start_time"); v != "" {
+		req.StartTime, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			respondError(c, 400, "invalid_request", "Invalid start_time", nil)
+			return
+		}
+	}
+	if v := c.Query("end_time"); v != "" {
+		req.EndTime, err = strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			respondError(c, 400, "invalid_request", "Invalid end_time", nil)
+			return
+		}
+	}
+	req.PageURL, req.UserID = c.Query("page_url"), c.Query("user_id")
+	req.Limit = 10
+	if v := c.Query("limit"); v != "" {
+		req.Limit, err = strconv.Atoi(v)
+		if err != nil {
+			respondError(c, 400, "invalid_request", "Invalid limit", nil)
+			return
+		}
+	}
+	if req.Limit < 1 || req.Limit > 1000 || req.StartTime < 0 || req.EndTime < 0 || (req.EndTime > 0 && req.EndTime < req.StartTime) || c.Query("sql") != "" {
+		respondError(c, 400, "invalid_request", "Use filters and limit 1..1000; raw SQL is disabled", nil)
 		return
 	}
-
-	if err := validateSQLQuery(sqlQuery); err != nil {
-		respondError(c, http.StatusBadRequest, "sql_validation_failed", err.Error(), nil)
-		return
-	}
-
-	results, err := h.repo.ProxyQuery(c.Request.Context(), sqlQuery)
+	results, err := h.service.QueryEvents(c.Request.Context(), &req)
 	if err != nil {
-		h.log.Error().Err(err).Msg("Failed to proxy query")
-		respondError(c, http.StatusInternalServerError, "query_failed", "Failed to execute query", nil)
+		respondError(c, 500, "query_failed", "Failed to query events", nil)
 		return
 	}
-
-	respondSuccess(c, http.StatusOK, gin.H{
-		"data":  results,
-		"count": len(results),
-	})
+	respondSuccess(c, 200, gin.H{"data": results, "count": len(results)})
 }
 
 func (h *EventHandler) writeAudit(c *gin.Context, action, resource, status, details string) {
@@ -166,29 +178,4 @@ func (h *EventHandler) writeAudit(c *gin.Context, action, resource, status, deta
 	if err := h.auditRepo.Insert(context.Background(), entry); err != nil {
 		h.log.Error().Err(err).Msg("Failed to write audit entry")
 	}
-}
-
-func validateSQLQuery(query string) error {
-	if strings.Contains(query, ";") {
-		return fmt.Errorf("multiple statements are not allowed")
-	}
-
-	trimmed := strings.TrimSpace(strings.ToLower(query))
-	if !strings.HasPrefix(trimmed, "select") {
-		return fmt.Errorf("only SELECT statements are allowed")
-	}
-
-	disallowed := []string{"insert", "update", "delete", "drop", "alter", "create", "system", "truncate", "optimize"}
-	for _, kw := range disallowed {
-		if strings.Contains(trimmed, kw+" ") || strings.Contains(trimmed, " "+kw) {
-			return fmt.Errorf("keyword '%s' is not allowed", kw)
-		}
-	}
-
-	limitRe := regexp.MustCompile(`(?i)limit\s+\d+`)
-	if !limitRe.MatchString(query) {
-		return fmt.Errorf("a LIMIT clause is required")
-	}
-
-	return nil
 }

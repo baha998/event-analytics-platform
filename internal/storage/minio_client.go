@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -117,4 +118,20 @@ func (m *MinIOClient) UploadFile(ctx context.Context, bucketName, objectName, fi
 		Msg("File uploaded successfully")
 
 	return nil
+}
+
+func (m *MinIOClient) DeleteBefore(ctx context.Context, bucket string, cutoff time.Time) (int, error) {
+	deleted := 0
+	for object := range m.client.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if object.Err != nil {
+			return deleted, object.Err
+		}
+		if object.LastModified.Before(cutoff) {
+			if err := m.client.RemoveObject(ctx, bucket, object.Key, minio.RemoveObjectOptions{}); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	return deleted, ctx.Err()
 }

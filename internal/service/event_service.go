@@ -41,27 +41,33 @@ func NewEventService(repo EventRepository, producer EventProducer, log zerolog.L
 }
 
 // CreateSource creates a source and generates events
-func (s *EventService) CreateSource(ctx context.Context, req *repository.SourceRequest) error {
-	if req.Count == 0 {
-		req.Count = 10
+func (s *EventService) ValidateSource(req *repository.SourceRequest) error {
+	if req == nil || req.Topic == "" {
+		return fmt.Errorf("topic is required")
 	}
-	if req.Interval == 0 {
-		req.Interval = 100
+	if req.Count < 1 || req.Count > 100 {
+		return fmt.Errorf("count must be between 1 and 100")
 	}
-
-	// Generate and send events asynchronously
-	go s.generateAndSendEvents(req.Topic, req.Count, req.Interval)
-
-	s.log.Info().
-		Str("topic", req.Topic).
-		Int("count", req.Count).
-		Msg("Source creation initiated")
-
+	if req.Interval < 0 || req.Interval > 1000 {
+		return fmt.Errorf("interval must be between 0 and 1000 ms")
+	}
+	if p, ok := s.producer.(interface{ Topic() string }); ok && req.Topic != p.Topic() {
+		return fmt.Errorf("topic must be %s", p.Topic())
+	}
+	if (req.Count-1)*req.Interval > 10000 {
+		return fmt.Errorf("generation duration must not exceed 10 seconds")
+	}
 	return nil
 }
+func (s *EventService) CreateSource(ctx context.Context, req *repository.SourceRequest) error {
+	if err := s.ValidateSource(req); err != nil {
+		return err
+	}
+	return s.generateAndSendEvents(ctx, req.Topic, req.Count, req.Interval)
+}
 
-// generateAndSendEvents generates and sends events to Kafka
-func (s *EventService) generateAndSendEvents(topic string, count, intervalMs int) {
+// generateAndSendEvents returns broker errors to the caller.
+func (s *EventService) generateAndSendEvents(ctx context.Context, topic string, count, intervalMs int) error {
 	s.log.Info().
 		Str("topic", topic).
 		Int("count", count).
@@ -71,9 +77,11 @@ func (s *EventService) generateAndSendEvents(topic string, count, intervalMs int
 	userIDs := []string{"user1001", "user1002", "user1003", "user1004", "user1005", "user1006", "user1007", "user1008", "user1009", "user1010"}
 
 	successCount := 0
-	errorCount := 0
 
 	for i := 0; i < count; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		event := &kafka.Event{
 			EventID:   uuid.New().String(),
 			EventType: "click",
@@ -85,23 +93,25 @@ func (s *EventService) generateAndSendEvents(topic string, count, intervalMs int
 		if err := s.producer.SendEvent(event); err != nil {
 			s.log.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to send event")
 			metrics.KafkaMessageProcessingErrors.WithLabelValues(topic).Inc()
-			errorCount++
-			continue
+			return err
 		}
 
-		metrics.KafkaMessagesProduced.WithLabelValues(topic).Inc()
 		successCount++
 
 		if i < count-1 && intervalMs > 0 {
-			time.Sleep(time.Duration(intervalMs) * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(intervalMs) * time.Millisecond):
+			}
 		}
 	}
 
 	s.log.Info().
 		Str("topic", topic).
 		Int("success", successCount).
-		Int("errors", errorCount).
 		Msg("Event generation completed")
+	return nil
 }
 
 // ProcessEvent processes an event from Kafka
@@ -116,12 +126,18 @@ func (s *EventService) ProcessEvent(ctx context.Context, eventData []byte) error
 		return fmt.Errorf("invalid event: %w", err)
 	}
 
+	timestamp, err := time.Parse(time.RFC3339, event.Timestamp)
+	if err != nil {
+		return err
+	}
+
 	// Convert to repository event for ClickHouse storage
 	repoEvent := &repository.Event{
 		EventID:   event.EventID,
-		Timestamp: parseTimestamp(event.Timestamp),
+		Timestamp: timestamp,
 		PageURL:   event.PageURL,
-		UserID:    parseUserID(event.UserID),
+		UserID:    event.UserID,
+		EventType: event.EventType,
 		Source:    "kafka",
 	}
 
@@ -133,7 +149,6 @@ func (s *EventService) ProcessEvent(ctx context.Context, eventData []byte) error
 	}
 
 	metrics.EventsInserted.Inc()
-	metrics.KafkaMessagesConsumed.WithLabelValues("events").Inc()
 	metrics.ClickHouseQueriesTotal.WithLabelValues("insert").Inc()
 	metrics.ClickHouseQueryDuration.WithLabelValues("insert").Observe(time.Since(start).Seconds())
 
@@ -162,26 +177,4 @@ func (s *EventService) QueryEvents(ctx context.Context, req *repository.QueryReq
 	s.log.Debug().Int("count", len(results)).Msg("Query executed successfully")
 
 	return results, nil
-}
-
-// Helper functions
-func parseTimestamp(timestampStr string) int64 {
-	t, err := time.Parse(time.RFC3339, timestampStr)
-	if err != nil {
-		return time.Now().Unix()
-	}
-	return t.Unix()
-}
-
-func parseUserID(userIDStr string) int {
-	// Simple conversion - in production, use proper parsing
-	// For now, return a hash-based integer
-	hash := 0
-	for _, c := range userIDStr {
-		hash = hash*31 + int(c)
-	}
-	if hash < 0 {
-		hash = -hash
-	}
-	return hash
 }

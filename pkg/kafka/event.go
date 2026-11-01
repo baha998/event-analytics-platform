@@ -20,7 +20,7 @@ func (e *Event) Validate() error {
 	if e.EventID == "" {
 		return fmt.Errorf("event_id is required")
 	}
-	if e.EventType != "click" && e.EventType != "transaction" {
+	if e.EventType != "click" && e.EventType != "transaction" && e.EventType != "pageview" {
 		return fmt.Errorf("event_type must be 'click' or 'transaction', got: %s", e.EventType)
 	}
 	if e.UserID == "" {

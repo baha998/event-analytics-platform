@@ -28,7 +28,7 @@ func AuthMiddleware(jwtManager *auth.JWTManager, log zerolog.Logger) gin.Handler
 
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			log.Warn().Str("header", authHeader).Msg("Invalid authorization header format")
+			log.Warn().Msg("Invalid authorization header format")
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error": gin.H{
 					"code":    "invalid_authorization_format",

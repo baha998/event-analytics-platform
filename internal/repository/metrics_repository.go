@@ -34,14 +34,14 @@ func NewMetricsRepository(conn clickhouse.Conn, log zerolog.Logger) *MetricsRepo
 // InsertMetric inserts a single metric
 func (r *MetricsRepository) InsertMetric(ctx context.Context, metric *Metric) error {
 	query := `
-		INSERT INTO metrics (timestamp, metric_name, dimension, value)
+		INSERT INTO metrics (timestamp, metric_name, dimensions, value)
 		VALUES (?, ?, ?, ?)
 	`
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := r.conn.Exec(ctx, query, metric.Timestamp, metric.MetricName, metric.Dimension, metric.Value); err != nil {
+	if err := r.conn.Exec(ctx, query, metric.Timestamp, metric.MetricName, map[string]string{"dimension": metric.Dimension}, metric.Value); err != nil {
 		r.log.Error().Err(err).
 			Str("metric_name", metric.MetricName).
 			Str("dimension", metric.Dimension).
@@ -61,14 +61,14 @@ func (r *MetricsRepository) BatchInsertMetrics(ctx context.Context, metrics []*M
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	batch, err := r.conn.PrepareBatch(ctx, "INSERT INTO metrics (timestamp, metric_name, dimension, value)")
+	batch, err := r.conn.PrepareBatch(ctx, "INSERT INTO metrics (timestamp, metric_name, dimensions, value)")
 	if err != nil {
 		r.log.Error().Err(err).Msg("Failed to prepare batch")
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
 
 	for _, metric := range metrics {
-		if err := batch.Append(metric.Timestamp, metric.MetricName, metric.Dimension, metric.Value); err != nil {
+		if err := batch.Append(metric.Timestamp, metric.MetricName, map[string]string{"dimension": metric.Dimension}, metric.Value); err != nil {
 			r.log.Error().Err(err).
 				Str("metric_name", metric.MetricName).
 				Msg("Failed to append metric to batch")
@@ -91,7 +91,7 @@ func (r *MetricsRepository) QueryMetrics(ctx context.Context, req *MetricQueryRe
 	defer cancel()
 
 	query := `
-		SELECT timestamp, metric_name, dimension, value
+		SELECT timestamp, metric_name, dimensions['dimension'], value
 		FROM metrics
 		WHERE 1=1
 	`
@@ -116,7 +116,7 @@ func (r *MetricsRepository) QueryMetrics(ctx context.Context, req *MetricQueryRe
 	}
 
 	if req.Dimension != "" {
-		query += " AND dimension = ?"
+		query += " AND dimensions['dimension'] = ?"
 		args = append(args, req.Dimension)
 	}
 
@@ -139,7 +139,7 @@ func (r *MetricsRepository) QueryMetrics(ctx context.Context, req *MetricQueryRe
 		var metric Metric
 		if err := rows.Scan(&metric.Timestamp, &metric.MetricName, &metric.Dimension, &metric.Value); err != nil {
 			r.log.Error().Err(err).Msg("Failed to scan row")
-			continue
+			return nil, fmt.Errorf("scan metric: %w", err)
 		}
 		results = append(results, &metric)
 	}
@@ -166,25 +166,19 @@ func (r *MetricsRepository) AggregateDaily(ctx context.Context, date time.Time, 
 	startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
 	endOfDay := startOfDay.Add(24 * time.Hour)
 
-	query := `
-		SELECT 
-			toStartOfDay(timestamp) as day,
-			metric_name,
-			dimension,
-			SUM(value) as total_value,
-			COUNT(*) as count
-		FROM metrics
-		WHERE timestamp >= ? 
-			AND timestamp < ?
-			AND metric_name = ?
-		GROUP BY day, metric_name, dimension
-		ORDER BY day DESC, dimension
-	`
+	eventType := "click"
+	if metricName == "transaction_count" {
+		eventType = "transaction"
+	}
+	query := `SELECT toStartOfDay(timestamp) AS day, ? AS metric_name, page_url AS dimension,
+ toFloat64(uniqExact(event_id)) AS total_value, count() AS count
+ FROM events WHERE timestamp >= ? AND timestamp < ? AND event_type = ?
+ GROUP BY day, page_url ORDER BY day, page_url`
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	rows, err := r.conn.Query(ctx, query, startOfDay, endOfDay, metricName)
+	rows, err := r.conn.Query(ctx, query, metricName, startOfDay, endOfDay, eventType)
 	if err != nil {
 		r.log.Error().Err(err).Msg("Failed to aggregate daily metrics")
 		return nil, fmt.Errorf("failed to aggregate daily metrics: %w", err)
@@ -194,10 +188,10 @@ func (r *MetricsRepository) AggregateDaily(ctx context.Context, date time.Time, 
 	var results []*Metric
 	for rows.Next() {
 		var metric Metric
-		var count int64
+		var count uint64
 		if err := rows.Scan(&metric.Timestamp, &metric.MetricName, &metric.Dimension, &metric.Value, &count); err != nil {
 			r.log.Error().Err(err).Msg("Failed to scan row")
-			continue
+			return nil, fmt.Errorf("scan metric: %w", err)
 		}
 		results = append(results, &metric)
 	}
@@ -208,4 +202,12 @@ func (r *MetricsRepository) AggregateDaily(ctx context.Context, date time.Time, 
 	}
 
 	return results, nil
+}
+
+func (r *MetricsRepository) ReplaceDailySummary(ctx context.Context, date time.Time, name string, values []*Metric) error {
+	start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+	if err := r.conn.Exec(ctx, "ALTER TABLE metrics DELETE WHERE timestamp >= ? AND timestamp < ? AND metric_name = ? SETTINGS mutations_sync = 1", start, start.Add(24*time.Hour), name); err != nil {
+		return err
+	}
+	return r.BatchInsertMetrics(ctx, values)
 }

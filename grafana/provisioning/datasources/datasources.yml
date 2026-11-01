@@ -2,6 +2,7 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
@@ -11,6 +12,7 @@ datasources:
       timeInterval: "15s"
 
   - name: ClickHouse
+    uid: clickhouse
     type: grafana-clickhouse-datasource
     access: proxy
     url: http://clickhouse-server:8123
@@ -22,9 +24,10 @@ datasources:
       username: default
       protocol: http
     secureJsonData:
-      password: clickhouse123
+      password: ${CLICKHOUSE_PASSWORD}
 
   - name: Loki
+    uid: loki
     type: loki
     access: proxy
     url: http://loki:3100

@@ -3,6 +3,8 @@ package validation
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -14,7 +16,7 @@ type EventSchema struct {
 	EventID   string `json:"event_id" validate:"required,uuid"`
 	EventType string `json:"event_type" validate:"required,oneof=click transaction pageview"`
 	UserID    string `json:"user_id" validate:"required,min=1"`
-	PageURL   string `json:"page_url,omitempty" validate:"omitempty,url"`
+	PageURL   string `json:"page_url,omitempty" validate:"omitempty,pageurl"`
 	Timestamp string `json:"timestamp" validate:"required,datetime=2006-01-02T15:04:05Z07:00"`
 }
 
@@ -22,6 +24,11 @@ var validate *validator.Validate
 
 func init() {
 	validate = validator.New()
+	validate.RegisterValidation("pageurl", func(fl validator.FieldLevel) bool {
+		value := fl.Field().String()
+		parsed, err := url.ParseRequestURI(value)
+		return err == nil && ((strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//")) || ((parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""))
+	})
 }
 
 // ValidateEvent unmarshals and validates JSON event data
@@ -37,7 +44,7 @@ func ValidateEvent(jsonData []byte) (*EventSchema, error) {
 	if err := validate.Struct(event); err != nil {
 		// Format validation errors for better readability
 		if validationErrors, ok := err.(validator.ValidationErrors); ok {
-			return nil, formatValidationErrors(validationErrors)
+			return nil, fmt.Errorf("%s (PageURL must be an HTTP URL or absolute path)", formatValidationErrors(validationErrors))
 		}
 		return nil, fmt.Errorf("validation failed: %w", err)
 	}

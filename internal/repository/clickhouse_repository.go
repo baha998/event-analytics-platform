@@ -26,14 +26,14 @@ func NewClickHouseRepository(conn clickhouse.Conn, log zerolog.Logger) *ClickHou
 // InsertEvent inserts a single event into ClickHouse
 func (r *ClickHouseRepository) InsertEvent(ctx context.Context, event *Event) error {
 	query := `
-		INSERT INTO events (event_id, timestamp, page_url, user_id)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO events (event_id, timestamp, page_url, user_id, event_type)
+		VALUES (?, ?, ?, ?, ?)
 	`
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := r.conn.Exec(ctx, query, event.EventID, event.Timestamp, event.PageURL, event.UserID); err != nil {
+	if err := r.conn.Exec(ctx, query, event.EventID, event.Timestamp, event.PageURL, event.UserID, event.EventType); err != nil {
 		r.log.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to insert event")
 		return fmt.Errorf("failed to insert event: %w", err)
 	}
@@ -51,14 +51,14 @@ func (r *ClickHouseRepository) BatchInsertEvents(ctx context.Context, events []*
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	batch, err := r.conn.PrepareBatch(ctx, "INSERT INTO events (event_id, timestamp, page_url, user_id)")
+	batch, err := r.conn.PrepareBatch(ctx, "INSERT INTO events (event_id, timestamp, page_url, user_id, event_type)")
 	if err != nil {
 		r.log.Error().Err(err).Msg("Failed to prepare batch")
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
 
 	for _, event := range events {
-		if err := batch.Append(event.EventID, event.Timestamp, event.PageURL, event.UserID); err != nil {
+		if err := batch.Append(event.EventID, event.Timestamp, event.PageURL, event.UserID, event.EventType); err != nil {
 			r.log.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to append event to batch")
 			return fmt.Errorf("failed to append event to batch: %w", err)
 		}
@@ -82,23 +82,23 @@ func (r *ClickHouseRepository) QueryEvents(ctx context.Context, req *QueryReques
 	query := `
 		SELECT 
 			page_url,
-			count() as click_count
+			uniqExact(event_id) as click_count
 		FROM events
-		WHERE 1=1
+		WHERE event_type = 'click'
 	`
 	args := []interface{}{}
 
 	if req.StartTime > 0 {
 		query += " AND timestamp >= ?"
-		args = append(args, req.StartTime)
+		args = append(args, time.Unix(req.StartTime, 0))
 	}
 
 	if req.EndTime > 0 {
 		query += " AND timestamp <= ?"
-		args = append(args, req.EndTime)
+		args = append(args, time.Unix(req.EndTime, 0))
 	} else {
 		query += " AND timestamp <= ?"
-		args = append(args, time.Now().Unix())
+		args = append(args, time.Now())
 	}
 
 	if req.PageURL != "" {
@@ -106,7 +106,7 @@ func (r *ClickHouseRepository) QueryEvents(ctx context.Context, req *QueryReques
 		args = append(args, req.PageURL)
 	}
 
-	if req.UserID > 0 {
+	if req.UserID != "" {
 		query += " AND user_id = ?"
 		args = append(args, req.UserID)
 	}
@@ -127,12 +127,12 @@ func (r *ClickHouseRepository) QueryEvents(ctx context.Context, req *QueryReques
 	}
 	defer rows.Close()
 
-	var results []*QueryResult
+	results := make([]*QueryResult, 0)
 	for rows.Next() {
 		var result QueryResult
 		if err := rows.Scan(&result.PageURL, &result.ClickCount); err != nil {
 			r.log.Error().Err(err).Msg("Failed to scan row")
-			continue
+			return nil, fmt.Errorf("scan event: %w", err)
 		}
 		results = append(results, &result)
 	}
@@ -151,41 +151,19 @@ func (r *ClickHouseRepository) Ping(ctx context.Context) error {
 	return r.conn.Ping(ctx)
 }
 
-// ProxyQuery executes a validated raw SELECT query and returns rows as maps.
-func (r *ClickHouseRepository) ProxyQuery(ctx context.Context, sql string) ([]map[string]interface{}, error) {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	rows, err := r.conn.Query(ctx, sql)
-	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+func (r *ClickHouseRepository) CountEventsOnDate(ctx context.Context, date string) (uint64, error) {
+	var count uint64
+	err := r.conn.QueryRow(ctx, "SELECT uniqExact(event_id) FROM events WHERE toDate(timestamp) = toDate(?)", date).Scan(&count)
+	return count, err
+}
+func (r *ClickHouseRepository) DeleteEventsBefore(ctx context.Context, cutoff time.Time) (uint64, error) {
+	var count uint64
+	if err := r.conn.QueryRow(ctx, "SELECT count() FROM events WHERE timestamp < ?", cutoff).Scan(&count); err != nil {
+		return 0, err
 	}
-	defer rows.Close()
-
-	cols := rows.ColumnTypes()
-	results := make([]map[string]interface{}, 0)
-
-	for rows.Next() {
-		values := make([]interface{}, len(cols))
-		for i := range values {
-			values[i] = new(interface{})
-		}
-
-		if err := rows.Scan(values...); err != nil {
-			r.log.Error().Err(err).Msg("failed to scan proxy row")
-			return nil, fmt.Errorf("failed to scan row: %w", err)
-		}
-
-		rowMap := make(map[string]interface{}, len(cols))
-		for i, col := range cols {
-			rowMap[col.Name()] = *(values[i].(*interface{}))
-		}
-		results = append(results, rowMap)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
-	}
-
-	return results, nil
+	err := r.conn.Exec(ctx, "ALTER TABLE events DELETE WHERE timestamp < ? SETTINGS mutations_sync = 1", cutoff)
+	return count, err
+}
+func (r *ClickHouseRepository) Optimize(ctx context.Context) error {
+	return r.conn.Exec(ctx, "OPTIMIZE TABLE events")
 }

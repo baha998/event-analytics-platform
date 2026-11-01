@@ -89,6 +89,9 @@ func (sp *StreamProcessor) Start() {
 
 // ProcessEvent processes a single event
 func (sp *StreamProcessor) ProcessEvent(ctx context.Context, event *kafka.Event) error {
+	if event.EventType != "click" && sp.config.MetricName == "click_count" {
+		return nil
+	}
 	start := time.Now()
 
 	// Parse timestamp
@@ -217,5 +220,9 @@ type StoreMetricsJob struct {
 }
 
 func (j *StoreMetricsJob) Execute(ctx context.Context) error {
-	return j.metricsRepo.BatchInsertMetrics(ctx, j.metrics)
+	err := j.metricsRepo.BatchInsertMetrics(ctx, j.metrics)
+	if err != nil {
+		j.log.Error().Err(err).Msg("Failed to store window metrics")
+	}
+	return err
 }

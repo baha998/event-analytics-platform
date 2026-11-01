@@ -15,12 +15,14 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"devops-fall2025-23b031152/internal/batch"
 	"devops-fall2025-23b031152/internal/config"
 	"devops-fall2025-23b031152/internal/handler"
 	"devops-fall2025-23b031152/internal/middleware"
 	"devops-fall2025-23b031152/internal/processor"
 	"devops-fall2025-23b031152/internal/repository"
 	"devops-fall2025-23b031152/internal/service"
+	"devops-fall2025-23b031152/internal/storage"
 	"devops-fall2025-23b031152/pkg/auth"
 	"devops-fall2025-23b031152/pkg/kafka"
 )
@@ -28,6 +30,10 @@ import (
 func main() {
 	// Load configuration
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Initialize logger
 	logger := initLogger(cfg.Logging)
@@ -49,7 +55,7 @@ func main() {
 		Topic:         cfg.Kafka.TopicEvents,
 		MaxRetries:    cfg.Kafka.MaxRetries,
 		RetryBackoff:  cfg.Kafka.RetryBackoff,
-		EnableMetrics: true,
+		EnableMetrics: cfg.Processor.EnableMetrics,
 	}, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize Kafka producer")
@@ -69,7 +75,9 @@ func main() {
 	streamProcessor := service.SetupClickStreamProcessor(
 		metricsRepo,
 		cfg.Processor.WindowDuration,
+		cfg.Processor.FlushInterval,
 		cfg.Processor.WorkerCount,
+		cfg.Processor.EnableMetrics,
 		logger,
 	)
 	streamProcessor.Start()
@@ -86,11 +94,9 @@ func main() {
 	// Initialize cron scheduler
 	cronScheduler := processor.NewCronScheduler(batchProcessor, logger)
 	if err := cronScheduler.ScheduleDailyAggregation(cfg.Processor.CronSchedule, "click_count"); err != nil {
-		logger.Error().Err(err).Msg("Failed to schedule daily aggregation")
+		logger.Fatal().Err(err).Msg("Failed to schedule daily aggregation")
 	}
-	if err := cronScheduler.ScheduleDailyAggregation(cfg.Processor.CronSchedule, "transaction_sum"); err != nil {
-		logger.Error().Err(err).Msg("Failed to schedule transaction aggregation")
-	}
+
 	cronScheduler.Start()
 	defer cronScheduler.Stop()
 
@@ -105,20 +111,19 @@ func main() {
 			eventJSON, err := kafka.MarshalEvent(event)
 			if err != nil {
 				logger.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to marshal event")
-				continue
+				return err
 			}
 
 			if err := eventService.ProcessEvent(context.Background(), eventJSON); err != nil {
 				logger.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to process event")
-				// Continue processing other events
-				continue
+				return err
 			}
 
 			// Process event for real-time aggregation
 			if err := streamProcessor.ProcessEvent(context.Background(), event); err != nil {
 				logger.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to process event for aggregation")
 				// Continue processing other events
-				continue
+				return err
 			}
 		}
 
@@ -133,7 +138,7 @@ func main() {
 		BatchTimeout:  cfg.Kafka.BatchTimeout,
 		MaxRetries:    cfg.Kafka.MaxRetries,
 		RetryBackoff:  cfg.Kafka.RetryBackoff,
-		EnableMetrics: true,
+		EnableMetrics: cfg.Processor.EnableMetrics,
 	}, batchHandler, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize Kafka consumer")
@@ -154,12 +159,20 @@ func main() {
 	)
 
 	// Initialize handlers
-	eventHandlerHTTP := handler.NewEventHandler(eventService, eventRepo, batchProcessor, auditRepo, logger)
+	eventHandlerHTTP := handler.NewEventHandler(eventService, batchProcessor, auditRepo, logger)
 	healthHandler := handler.NewHealthHandler(eventRepo, logger)
 	authHandler := handler.NewAuthHandler(jwtManager, cfg.Auth, logger)
 
+	minioClient, err := storage.NewMinIOClient(storage.MinIOConfig{Endpoint: cfg.Storage.Endpoint, AccessKeyID: cfg.Storage.AccessKey, SecretAccessKey: cfg.Storage.SecretKey}, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Invalid MinIO configuration")
+	}
+	exportDB := clickhouse.OpenDB(&clickhouse.Options{Addr: []string{cfg.ClickHouse.Host + ":" + cfg.ClickHouse.Port}, Auth: clickhouse.Auth{Database: cfg.ClickHouse.Database, Username: cfg.ClickHouse.Username, Password: cfg.ClickHouse.Password}})
+	defer exportDB.Close()
+	batchHTTP := handler.NewBatchHandler(batch.NewExporter(exportDB, minioClient, logger), batchProcessor, eventRepo, minioClient, auditRepo, logger)
+
 	// Setup router
-	router := setupRouter(cfg, eventHandlerHTTP, healthHandler, authHandler, jwtManager, logger)
+	router := setupRouter(cfg, eventHandlerHTTP, healthHandler, authHandler, batchHTTP, jwtManager, logger)
 
 	// Start HTTP server
 	srv := &http.Server{
@@ -199,11 +212,13 @@ func setupRouter(
 	eventHandler *handler.EventHandler,
 	healthHandler *handler.HealthHandler,
 	authHandler *handler.AuthHandler,
+	batchHandler *handler.BatchHandler,
 	jwtManager *auth.JWTManager,
 	logger zerolog.Logger,
 ) *gin.Engine {
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
+	_ = router.SetTrustedProxies(nil)
 
 	// 1. Recovery middleware FIRST (critical for handling panics)
 	router.Use(gin.Recovery())
@@ -228,6 +243,8 @@ func setupRouter(
 	// 3. Register health and metrics endpoints BEFORE other middleware
 	// These should always work, even if other services are down
 	router.GET("/health", healthHandler.Health)
+	router.GET("/health/ready", healthHandler.Ready)
+	router.HEAD("/health/ready", healthHandler.Ready)
 	router.HEAD("/health", healthHandler.Health) // Docker health check uses HEAD
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
@@ -257,6 +274,15 @@ func setupRouter(
 
 		// GET /api/query - requires viewer or admin role
 		api.GET("/query", middleware.RequireViewer(logger), eventHandler.QueryEvents)
+		admin := api.Group("")
+		admin.Use(middleware.RequireAdmin(logger))
+		admin.POST("/batch/export", batchHandler.ExportBatchEvents)
+		admin.POST("/batch/aggregate", batchHandler.AggregateBatchData)
+		admin.POST("/batch/cleanup", batchHandler.CleanupTempFiles)
+		admin.POST("/cleanup/events", batchHandler.CleanupOldEvents)
+		admin.POST("/cleanup/minio", batchHandler.CleanupMinIOFiles)
+		admin.POST("/optimize/clickhouse", batchHandler.Optimize)
+
 	}
 
 	return router
@@ -273,7 +299,7 @@ func initClickHouse(cfg config.ClickHouseConfig, logger zerolog.Logger) (clickho
 		DialTimeout:     10 * time.Second,
 		MaxOpenConns:    cfg.MaxOpenConns,
 		MaxIdleConns:    cfg.MaxIdleConns,
-		ConnMaxLifetime: time.Hour,
+		ConnMaxLifetime: cfg.ConnMaxLifetime,
 		Compression: &clickhouse.Compression{
 			Method: clickhouse.CompressionLZ4,
 		},

@@ -63,6 +63,12 @@ func NewProducer(config ProducerConfig, log zerolog.Logger) (*Producer, error) {
 
 // SendEvent sends a single event to Kafka with retry logic
 func (p *Producer) SendEvent(event *Event) error {
+	if event == nil {
+		return fmt.Errorf("event is required")
+	}
+	if err := event.Validate(); err != nil {
+		return err
+	}
 	eventJSON, err := MarshalEvent(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event: %w", err)
@@ -79,6 +85,12 @@ func (p *Producer) SendEvents(events []*Event) error {
 
 	messages := make([]*sarama.ProducerMessage, 0, len(events))
 	for _, event := range events {
+		if event == nil {
+			return fmt.Errorf("event is required")
+		}
+		if err := event.Validate(); err != nil {
+			return err
+		}
 		eventJSON, err := MarshalEvent(event)
 		if err != nil {
 			p.log.Error().Err(err).Str("event_id", event.EventID).Msg("Failed to marshal event")
@@ -234,3 +246,5 @@ func (p *Producer) Close() error {
 	p.log.Info().Msg("Kafka producer closed")
 	return nil
 }
+
+func (p *Producer) Topic() string { return p.config.Topic }

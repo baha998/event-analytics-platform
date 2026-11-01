@@ -64,7 +64,6 @@ type Aggregator struct {
 type AggregationData struct {
 	Count      int64
 	Sum        float64
-	Values     []float64 // For AVG calculation
 	Window     Window
 	LastUpdate time.Time
 }
@@ -91,14 +90,12 @@ func (a *Aggregator) AddEvent(timestamp time.Time, dimension string, value float
 	if a.windows[windowKey][dimension] == nil {
 		a.windows[windowKey][dimension] = &AggregationData{
 			Window: window,
-			Values: make([]float64, 0),
 		}
 	}
 
 	data := a.windows[windowKey][dimension]
 	data.Count++
 	data.Sum += value
-	data.Values = append(data.Values, value)
 	data.LastUpdate = timestamp
 }
 

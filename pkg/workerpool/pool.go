@@ -12,6 +12,8 @@ type Job interface {
 
 // WorkerPool manages a pool of workers
 type WorkerPool struct {
+	mu          sync.RWMutex
+	closed      bool
 	workerCount int
 	jobQueue    chan Job
 	wg          sync.WaitGroup
@@ -50,20 +52,20 @@ func (wp *WorkerPool) Start() {
 func (wp *WorkerPool) worker(id int) {
 	defer wp.wg.Done()
 
-	for {
-		select {
-		case <-wp.ctx.Done():
-			return
-		case job := <-wp.jobQueue:
-			if job != nil {
-				_ = job.Execute(wp.ctx)
-			}
+	for job := range wp.jobQueue {
+		if job != nil {
+			_ = job.Execute(wp.ctx)
 		}
 	}
 }
 
 // Submit submits a job to the pool
 func (wp *WorkerPool) Submit(job Job) error {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
+	if wp.closed {
+		return context.Canceled
+	}
 	select {
 	case <-wp.ctx.Done():
 		return wp.ctx.Err()
@@ -74,9 +76,16 @@ func (wp *WorkerPool) Submit(job Job) error {
 
 // Stop stops the worker pool gracefully
 func (wp *WorkerPool) Stop() {
-	wp.cancel()
+	wp.mu.Lock()
+	if wp.closed {
+		wp.mu.Unlock()
+		return
+	}
+	wp.closed = true
 	close(wp.jobQueue)
+	wp.mu.Unlock()
 	wp.wg.Wait()
+	wp.cancel()
 }
 
 // Stats returns pool statistics

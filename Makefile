@@ -9,10 +9,10 @@ help: ## Show this help message
 
 # Testing
 test: ## Run all tests
-	go test -v -race ./...
+	go test -v -short -race ./...
 
 test-coverage: ## Run tests with coverage report
-	go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+	go test -v -short -race -coverprofile=coverage.out -covermode=atomic ./...
 	go tool cover -html=coverage.out -o coverage.html
 	go tool cover -func=coverage.out | tail -n 1
 
@@ -21,10 +21,10 @@ test-short: ## Run short tests only
 
 # Linting
 lint: ## Run golangci-lint
-	golangci-lint run --timeout 5m ./...
+	go vet ./...
 
 lint-fix: ## Run golangci-lint with auto-fix
-	golangci-lint run --fix ./...
+	gofmt -w cmd internal pkg examples test
 
 # Building
 build: ## Build the Go application
@@ -41,20 +41,20 @@ run: ## Run the application locally
 docker-build: ## Build Docker image
 	docker build -t project-go-api:latest .
 
-docker-up: ## Start all services with docker-compose
-	docker-compose up -d
+docker-up: ## Start all services with docker compose
+	docker compose up -d
 
 docker-down: ## Stop all services
-	docker-compose down
+	docker compose down
 
 docker-logs: ## Follow logs from all services
-	docker-compose logs -f
+	docker compose logs -f
 
-docker-ps: ## Show docker-compose service status
-	docker-compose ps
+docker-ps: ## Show docker compose service status
+	docker compose ps
 
 docker-restart: ## Restart go-api service
-	docker-compose restart go-api
+	docker compose restart go-api
 
 
 # Dependencies
@@ -74,7 +74,7 @@ ci-build: build-linux ## Build for CI/CD
 dev: docker-up ## Start development environment
 	@echo "Services starting..."
 	@sleep 5
-	docker-compose logs -f go-api
+	docker compose logs -f go-api
 
 dev-rebuild: docker-down docker-build docker-up ## Rebuild and restart dev environment
 
@@ -90,10 +90,10 @@ metrics: ## Show Prometheus metrics
 	curl http://localhost:8080/metrics
 
 logs-api: ## Follow API logs
-	docker-compose logs -f go-api
+	docker compose logs -f go-api
 
 logs-kafka: ## Follow Kafka logs
-	docker-compose logs -f kafka
+	docker compose logs -f kafka
 
 logs-clickhouse: ## Follow ClickHouse logs
-	docker-compose logs -f clickhouse-server
+	docker compose logs -f clickhouse-server

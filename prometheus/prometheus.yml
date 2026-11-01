@@ -32,7 +32,7 @@ scrape_configs:
   # ClickHouse metrics
   - job_name: 'clickhouse'
     static_configs:
-      - targets: ['clickhouse-server:8123']
+      - targets: ['clickhouse-server:9363']
     metrics_path: '/metrics'
     scrape_interval: 30s
 

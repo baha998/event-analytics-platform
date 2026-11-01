@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -14,6 +15,7 @@ import (
 
 // Exporter handles batch export of events to MinIO as Parquet files
 type Exporter struct {
+	mu          sync.Mutex
 	db          *sql.DB
 	minioClient *storage.MinIOClient
 	log         zerolog.Logger
@@ -30,6 +32,8 @@ func NewExporter(db *sql.DB, minioClient *storage.MinIOClient, log zerolog.Logge
 
 // ExportDailyEvents exports events for a specific date to MinIO as Parquet
 func (e *Exporter) ExportDailyEvents(date string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	// Create context with 5-minute timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

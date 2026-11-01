@@ -1,16 +1,17 @@
-package auth
+package main
 
 import (
+	"devops-fall2025-23b031152/pkg/auth"
 	"fmt"
 	"os"
 	"time"
 )
 
 // GenerateTokenCLI is a helper function to generate tokens from command line
-// Usage: go run pkg/auth/token_gen.go <username> <role>
-func GenerateTokenCLI() {
+// Usage: go run ./cmd/token-gen <username> <role>
+func main() {
 	if len(os.Args) < 3 {
-		fmt.Println("Usage: go run pkg/auth/token_gen.go <username> <role>")
+		fmt.Println("Usage: go run ./cmd/token-gen <username> <role>")
 		fmt.Println("Roles: admin, viewer")
 		os.Exit(1)
 	}
@@ -25,10 +26,11 @@ func GenerateTokenCLI() {
 
 	secretKey := os.Getenv("JWT_SECRET_KEY")
 	if secretKey == "" {
-		secretKey = "your-secret-key-change-in-production"
+		fmt.Fprintln(os.Stderr, "JWT_SECRET_KEY is required")
+		os.Exit(1)
 	}
 
-	jwtManager := NewJWTManager(secretKey, 24*time.Hour, 7*24*time.Hour)
+	jwtManager := auth.NewJWTManager(secretKey, 24*time.Hour, 7*24*time.Hour)
 	token, err := jwtManager.GenerateToken(username, role)
 	if err != nil {
 		fmt.Printf("Error generating token: %v\n", err)

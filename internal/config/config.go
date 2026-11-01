@@ -1,13 +1,16 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Config holds all application configuration
 type Config struct {
+	Storage    StorageConfig
 	Server     ServerConfig
 	ClickHouse ClickHouseConfig
 	Kafka      KafkaConfig
@@ -18,6 +21,8 @@ type Config struct {
 	CORS       CORSConfig
 	RateLimit  RateLimitConfig
 }
+
+type StorageConfig struct{ Endpoint, AccessKey, SecretKey string }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
@@ -100,6 +105,7 @@ type ProcessorConfig struct {
 // Load loads configuration from environment variables
 func Load() *Config {
 	return &Config{
+		Storage: StorageConfig{Endpoint: getEnv("MINIO_ENDPOINT", "localhost:9002"), AccessKey: getEnv("MINIO_ACCESS_KEY", "admin"), SecretKey: getEnv("MINIO_SECRET_KEY", "admin123")},
 		Server: ServerConfig{
 			Port:         getEnv("SERVER_PORT", "8080"),
 			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 15*time.Second),
@@ -121,7 +127,7 @@ func Load() *Config {
 			RetryBackoff:    getDurationEnv("CLICKHOUSE_RETRY_BACKOFF", 100*time.Millisecond),
 		},
 		Kafka: KafkaConfig{
-			Brokers:       []string{getEnv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")},
+			Brokers:       getStringSliceEnv("KAFKA_BOOTSTRAP_SERVERS", []string{"kafka:9092"}),
 			Topics:        getStringSliceEnv("KAFKA_TOPICS", []string{getEnv("KAFKA_TOPIC_EVENTS", "events")}),
 			TopicEvents:   getEnv("KAFKA_TOPIC_EVENTS", "events"),
 			ConsumerGroup: getEnv("KAFKA_CONSUMER_GROUP", "event-processor"),
@@ -131,7 +137,7 @@ func Load() *Config {
 			RetryBackoff:  getDurationEnv("KAFKA_RETRY_BACKOFF", 100*time.Millisecond),
 		},
 		JWT: JWTConfig{
-			SecretKey:     getEnv("JWT_SECRET_KEY", "your-secret-key-change-in-production"),
+			SecretKey:     os.Getenv("JWT_SECRET_KEY"),
 			TokenExpiry:   getDurationEnv("JWT_TOKEN_EXPIRY", 24*time.Hour),
 			RefreshExpiry: getDurationEnv("JWT_REFRESH_EXPIRY", 7*24*time.Hour),
 		},
@@ -144,14 +150,14 @@ func Load() *Config {
 			FlushInterval:    getDurationEnv("PROCESSOR_FLUSH_INTERVAL", 1*time.Minute),
 			WorkerCount:      getIntEnv("PROCESSOR_WORKER_COUNT", 5),
 			BatchWorkerCount: getIntEnv("PROCESSOR_BATCH_WORKER_COUNT", 5),
-			CronSchedule:     getEnv("PROCESSOR_CRON_SCHEDULE", "0 1 * * *"), // Daily at 1 AM
+			CronSchedule:     getEnv("PROCESSOR_CRON_SCHEDULE", "0 0 1 * * *"), // Daily at 1 AM
 			EnableMetrics:    getBoolEnv("PROCESSOR_ENABLE_METRICS", true),
 		},
 		Auth: AuthConfig{
 			AdminUsername:  getEnv("AUTH_ADMIN_USERNAME", "admin"),
-			AdminPassword:  getEnv("AUTH_ADMIN_PASSWORD", "admin123"),
+			AdminPassword:  os.Getenv("AUTH_ADMIN_PASSWORD"),
 			ViewerUsername: getEnv("AUTH_VIEWER_USERNAME", "viewer"),
-			ViewerPassword: getEnv("AUTH_VIEWER_PASSWORD", "viewer123"),
+			ViewerPassword: os.Getenv("AUTH_VIEWER_PASSWORD"),
 		},
 		CORS: CORSConfig{
 			GrafanaOrigin: getEnv("GRAFANA_ORIGIN", "http://localhost:3000"),
@@ -204,31 +210,8 @@ func getStringSliceEnv(key string, defaultValue []string) []string {
 	return defaultValue
 }
 
-func splitString(s, sep string) []string {
-	result := []string{}
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if i+len(sep) <= len(s) && s[i:i+len(sep)] == sep {
-			result = append(result, s[start:i])
-			start = i + len(sep)
-			i += len(sep) - 1
-		}
-	}
-	result = append(result, s[start:])
-	return result
-}
-
-func trimSpace(s string) string {
-	start := 0
-	end := len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t' || s[start] == '\n' || s[start] == '\r') {
-		start++
-	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\n' || s[end-1] == '\r') {
-		end--
-	}
-	return s[start:end]
-}
+func splitString(s, sep string) []string { return strings.Split(s, sep) }
+func trimSpace(s string) string          { return strings.TrimSpace(s) }
 
 func getBoolEnv(key string, defaultValue bool) bool {
 	if value := os.Getenv(key); value != "" {
@@ -237,4 +220,17 @@ func getBoolEnv(key string, defaultValue bool) bool {
 		}
 	}
 	return defaultValue
+}
+
+func (c *Config) Validate() error {
+	if len(c.JWT.SecretKey) < 32 {
+		return fmt.Errorf("JWT_SECRET_KEY must contain at least 32 characters")
+	}
+	if c.Auth.AdminPassword == "" || c.Auth.ViewerPassword == "" {
+		return fmt.Errorf("AUTH_ADMIN_PASSWORD and AUTH_VIEWER_PASSWORD are required")
+	}
+	if c.Kafka.BatchSize < 1 || c.Kafka.BatchTimeout <= 0 || c.Processor.WindowDuration <= 0 || c.Processor.FlushInterval <= 0 {
+		return fmt.Errorf("batch sizes and processing durations must be positive")
+	}
+	return nil
 }

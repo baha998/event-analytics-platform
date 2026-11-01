@@ -2,7 +2,7 @@
   "info": {
     "name": "Real-Time Analytics API",
     "_postman_id": "9f5bb2b6-0000-4c1d-9b8b-collection",
-    "description": "Sample requests for JWT auth, admin actions, query proxy, and metrics.",
+    "description": "JWT auth, event generation, parameterized analytics, and metrics.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -11,7 +11,10 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
         ],
         "body": {
           "mode": "raw",
@@ -25,8 +28,14 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{jwtToken}}"
+          }
         ],
         "body": {
           "mode": "raw",
@@ -40,8 +49,14 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{jwtToken}}"
+          }
         ],
         "body": {
           "mode": "raw",
@@ -51,23 +66,16 @@
       }
     },
     {
-      "name": "Viewer - Query Proxy",
+      "name": "Viewer - Query clicks",
       "request": {
         "method": "GET",
         "header": [
-          { "key": "Authorization", "value": "Bearer {{jwtToken}}" }
+          {
+            "key": "Authorization",
+            "value": "Bearer {{jwtToken}}"
+          }
         ],
-        "url": {
-          "raw": "{{baseUrl}}/api/query?sql=SELECT%20page_url,%20count()%20AS%20clicks%20FROM%20events%20GROUP%20BY%20page_url%20LIMIT%2010",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "query"],
-          "query": [
-            {
-              "key": "sql",
-              "value": "SELECT page_url, count() AS clicks FROM events GROUP BY page_url LIMIT 10"
-            }
-          ]
-        }
+        "url": "{{baseUrl}}/api/query?limit=10"
       }
     },
     {
@@ -80,8 +88,13 @@
     }
   ],
   "variable": [
-    { "key": "baseUrl", "value": "http://localhost:8080" },
-    { "key": "jwtToken", "value": "" }
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "jwtToken",
+      "value": ""
+    }
   ]
 }
-
